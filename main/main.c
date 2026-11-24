@@ -238,13 +238,23 @@ void app_main(void)
 
     esp_lcd_panel_handle_t panel_handle = NULL;
     esp_lcd_touch_handle_t touch_handle = NULL;
-    ESP_ERROR_CHECK(waveshare_esp32_s3_rgb_lcd_init(
+    esp_err_t lcd_ret = waveshare_esp32_s3_rgb_lcd_init(
         ESP_LV_ADAPTER_TEAR_AVOID_MODE_TRIPLE_PARTIAL,
         ESP_LV_ADAPTER_ROTATE_0,
         &panel_handle,
-        &touch_handle));
-    ESP_ERROR_CHECK(waveshare_rgb_lcd_backlight_on());
-    ESP_ERROR_CHECK(lissajous_ui_init(panel_handle, touch_handle));
+        &touch_handle);
+    if (lcd_ret != ESP_OK) {
+        ESP_LOGE(TAG, "LCD init failed: %s", esp_err_to_name(lcd_ret));
+    } else {
+        lcd_ret = waveshare_rgb_lcd_backlight_on();
+        if (lcd_ret != ESP_OK) {
+            ESP_LOGW(TAG, "backlight failed: %s", esp_err_to_name(lcd_ret));
+        }
+        lcd_ret = lissajous_ui_init(panel_handle, touch_handle);
+        if (lcd_ret != ESP_OK) {
+            ESP_LOGE(TAG, "UI init failed: %s", esp_err_to_name(lcd_ret));
+        }
+    }
 
 #if CONFIG_STC_DIAGNOSTIC_UART
     ESP_LOGW(TAG,

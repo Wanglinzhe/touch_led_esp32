@@ -7,5 +7,5 @@ idf_component_register(
     INCLUDE_DIRS
         "."
         "../components"
-    REQUIRES driver esp_lvgl_adapter
+    REQUIRES driver esp_lvgl_adapter esp_mm
 )

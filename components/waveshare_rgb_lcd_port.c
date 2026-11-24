@@ -6,6 +6,7 @@
 
 #include "waveshare_rgb_lcd_port.h"
 
+#include "esp_cache.h"
 #include "esp_lcd_panel_io.h"
 #include "esp_lcd_touch_gt911.h"
 #include "esp_log.h"
@@ -13,6 +14,17 @@
 
 static const char *TAG = "lcd_port";
 static bool s_i2c_ready = false;
+
+#define CH422G_MODE_REG             0x24
+#define CH422G_OUTPUT_REG           0x38
+#define CH422G_MODE_OUTPUT          0x01
+#define CH422G_BIT_TP_RST           (1U << 1)
+#define CH422G_BIT_DISP             (1U << 2)
+#define CH422G_BIT_LCD_RST          (1U << 3)
+#define CH422G_BIT_SD_CS            (1U << 4)
+
+static uint8_t s_exio_output = CH422G_BIT_TP_RST | CH422G_BIT_DISP |
+                               CH422G_BIT_LCD_RST | CH422G_BIT_SD_CS;
 
 #if CONFIG_EXAMPLE_LCD_TOUCH_CONTROLLER_GT911
 static esp_err_t i2c_master_init_if_needed(void)
@@ -58,34 +70,107 @@ static esp_err_t touch_reset_gpio_init(void)
 
 static esp_err_t ch422g_init_for_output(void)
 {
-    uint8_t write_buf = 0x01;
-    return i2c_master_write_to_device(I2C_MASTER_NUM, 0x24, &write_buf, 1, I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
+    uint8_t write_buf = CH422G_MODE_OUTPUT;
+    return i2c_master_write_to_device(I2C_MASTER_NUM, CH422G_MODE_REG, &write_buf, 1,
+                                      I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
+}
+
+static esp_err_t ch422g_write_output(uint8_t value)
+{
+    s_exio_output = value;
+    return i2c_master_write_to_device(I2C_MASTER_NUM, CH422G_OUTPUT_REG, &s_exio_output, 1,
+                                      I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
+}
+
+static esp_err_t waveshare_lcd_release_reset(void)
+{
+    esp_err_t ret = i2c_master_init_if_needed();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    ret = ch422g_init_for_output();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+
+    /* EXIO3 is LCD_RST. The glass stays in its black/white/red/green/blue
+     * self-test until this pin is pulsed after power-up. */
+    uint8_t held_in_reset = (uint8_t)((CH422G_BIT_TP_RST | CH422G_BIT_DISP | CH422G_BIT_SD_CS) &
+                                      ~CH422G_BIT_LCD_RST);
+    ret = ch422g_write_output(held_in_reset);
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    esp_rom_delay_us(10 * 1000);
+    ret = ch422g_write_output((uint8_t)(held_in_reset | CH422G_BIT_LCD_RST));
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    esp_rom_delay_us(100 * 1000);
+    ESP_LOGI(TAG, "LCD reset released");
+    return ESP_OK;
 }
 
 static esp_err_t waveshare_esp32_s3_touch_reset(void)
 {
-    uint8_t write_buf = 0x2C;
+    esp_err_t ret = touch_reset_gpio_init();
+    if (ret != ESP_OK) {
+        return ret;
+    }
 
-    ESP_ERROR_CHECK(ch422g_init_for_output());
-    ESP_ERROR_CHECK(touch_reset_gpio_init());
-    ESP_ERROR_CHECK(i2c_master_write_to_device(I2C_MASTER_NUM, 0x38, &write_buf, 1, I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS));
-    esp_rom_delay_us(100 * 1000);
+    ret = ch422g_write_output((uint8_t)(s_exio_output & ~CH422G_BIT_TP_RST));
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    esp_rom_delay_us(10 * 1000);
     gpio_set_level(EXAMPLE_TOUCH_RESET_GPIO, 0);
     esp_rom_delay_us(100 * 1000);
-    write_buf = 0x2E;
-    ESP_ERROR_CHECK(i2c_master_write_to_device(I2C_MASTER_NUM, 0x38, &write_buf, 1, I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS));
+    ret = ch422g_write_output((uint8_t)(s_exio_output | CH422G_BIT_TP_RST));
+    if (ret != ESP_OK) {
+        return ret;
+    }
     esp_rom_delay_us(200 * 1000);
     return ESP_OK;
 }
 #endif
 
+static void paint_signal_lock_pattern(esp_lcd_panel_handle_t panel, uint8_t fb_count)
+{
+    void *framebuffers[3] = {0};
+    const size_t pixel_count = (size_t)EXAMPLE_LCD_H_RES * EXAMPLE_LCD_V_RES;
+
+    if ((fb_count == 0) || (fb_count > 3) ||
+        (esp_lcd_rgb_panel_get_frame_buffer(panel, fb_count, &framebuffers[0],
+                                            &framebuffers[1], &framebuffers[2]) != ESP_OK)) {
+        return;
+    }
+
+    for (int index = 0; index < 3; index++) {
+        uint16_t *pixels = framebuffers[index];
+        size_t pixel;
+
+        if (pixels == NULL) {
+            continue;
+        }
+        for (pixel = 0; pixel < pixel_count; pixel++) {
+            pixels[pixel] = (pixel < (pixel_count / 2U)) ? 0xF800 : 0x001F;
+        }
+        esp_cache_msync(pixels, pixel_count * sizeof(uint16_t),
+                        ESP_CACHE_MSYNC_FLAG_DIR_C2M | ESP_CACHE_MSYNC_FLAG_UNALIGNED);
+    }
+}
+
 esp_err_t waveshare_rgb_lcd_backlight_on(void)
 {
-    uint8_t write_buf = 0x1E;
-
-    ESP_ERROR_CHECK(i2c_master_init_if_needed());
-    ESP_ERROR_CHECK(ch422g_init_for_output());
-    return i2c_master_write_to_device(I2C_MASTER_NUM, 0x38, &write_buf, 1, I2C_MASTER_TIMEOUT_MS / portTICK_PERIOD_MS);
+    esp_err_t ret = i2c_master_init_if_needed();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    ret = ch422g_init_for_output();
+    if (ret != ESP_OK) {
+        return ret;
+    }
+    return ch422g_write_output((uint8_t)(s_exio_output | CH422G_BIT_DISP | CH422G_BIT_LCD_RST));
 }
 
 esp_err_t waveshare_esp32_s3_rgb_lcd_init(esp_lv_adapter_tear_avoid_mode_t tear_mode,
@@ -101,6 +186,11 @@ esp_err_t waveshare_esp32_s3_rgb_lcd_init(esp_lv_adapter_tear_avoid_mode_t tear_
     *touch_handle = NULL;
 
     const uint8_t num_fbs = esp_lv_adapter_get_required_frame_buffer_count(tear_mode, rotation);
+
+    esp_err_t reset_ret = waveshare_lcd_release_reset();
+    if (reset_ret != ESP_OK) {
+        ESP_LOGW(TAG, "CH422G LCD reset failed: %s", esp_err_to_name(reset_ret));
+    }
 
     ESP_LOGI(TAG, "Install RGB LCD panel driver");
     esp_lcd_rgb_panel_config_t panel_config = {
@@ -153,19 +243,38 @@ esp_err_t waveshare_esp32_s3_rgb_lcd_init(esp_lv_adapter_tear_avoid_mode_t tear_
         },
     };
 
-    ESP_ERROR_CHECK(esp_lcd_new_rgb_panel(&panel_config, panel_handle));
+    esp_err_t ret = esp_lcd_new_rgb_panel(&panel_config, panel_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "create RGB panel failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
     ESP_LOGI(TAG, "Initialize RGB LCD panel");
-    ESP_ERROR_CHECK(esp_lcd_panel_init(*panel_handle));
+    ret = esp_lcd_panel_init(*panel_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "RGB panel init failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
+    paint_signal_lock_pattern(*panel_handle, num_fbs);
 
 #if CONFIG_EXAMPLE_LCD_TOUCH_CONTROLLER_GT911
-    ESP_ERROR_CHECK(i2c_master_init_if_needed());
-    ESP_ERROR_CHECK(waveshare_esp32_s3_touch_reset());
+    ret = i2c_master_init_if_needed();
+    if (ret == ESP_OK) {
+        ret = waveshare_esp32_s3_touch_reset();
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "touch reset skipped: %s", esp_err_to_name(ret));
+        return ESP_OK;
+    }
 
     esp_lcd_panel_io_handle_t tp_io_handle = NULL;
     esp_lcd_panel_io_i2c_config_t tp_io_config = ESP_LCD_TOUCH_IO_I2C_GT911_CONFIG();
     tp_io_config.scl_speed_hz = 0;
     ESP_LOGI(TAG, "Initialize I2C panel IO");
-    ESP_ERROR_CHECK(esp_lcd_new_panel_io_i2c((esp_lcd_i2c_bus_handle_t)I2C_MASTER_NUM, &tp_io_config, &tp_io_handle));
+    ret = esp_lcd_new_panel_io_i2c((esp_lcd_i2c_bus_handle_t)I2C_MASTER_NUM, &tp_io_config, &tp_io_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "touch IO skipped: %s", esp_err_to_name(ret));
+        return ESP_OK;
+    }
 
     ESP_LOGI(TAG, "Initialize touch controller GT911");
     const esp_lcd_touch_config_t tp_cfg = {
@@ -183,7 +292,11 @@ esp_err_t waveshare_esp32_s3_rgb_lcd_init(esp_lv_adapter_tear_avoid_mode_t tear_
             .mirror_y = 0,
         },
     };
-    ESP_ERROR_CHECK(esp_lcd_touch_new_i2c_gt911(tp_io_handle, &tp_cfg, touch_handle));
+    ret = esp_lcd_touch_new_i2c_gt911(tp_io_handle, &tp_cfg, touch_handle);
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "GT911 skipped: %s", esp_err_to_name(ret));
+        *touch_handle = NULL;
+    }
 #endif
 
     return ESP_OK;
