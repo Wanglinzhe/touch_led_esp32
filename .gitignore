@@ -1,0 +1,8 @@
+build/
+build-*/
+managed_components/
+sdkconfig.old
+sdkconfig.previous
+sdkconfig.pre-*
+sdkconfig.generated-old2
+sdkconfig.production.bak
