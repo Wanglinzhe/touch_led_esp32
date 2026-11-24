@@ -26,7 +26,10 @@
 
 #define EXAMPLE_LCD_H_RES               (800)
 #define EXAMPLE_LCD_V_RES               (480)
-#define EXAMPLE_LCD_PIXEL_CLOCK_HZ      (12 * 1000 * 1000)
+/* 12 MHz is below the point where this panel locks, so it cycles its
+ * no-signal fields (green, blue, red, black, white). 16 MHz matches the
+ * Waveshare ST7262 example. */
+#define EXAMPLE_LCD_PIXEL_CLOCK_HZ      (16 * 1000 * 1000)
 #define EXAMPLE_RGB_BIT_PER_PIXEL       (16)
 #define EXAMPLE_RGB_DATA_WIDTH          (16)
 #define EXAMPLE_RGB_BOUNCE_LINES        CONFIG_EXAMPLE_LCD_RGB_BOUNCE_BUFFER_HEIGHT
